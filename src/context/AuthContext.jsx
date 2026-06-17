@@ -5,7 +5,7 @@ const AuthContext = createContext(null);
 export const useAuth = () => useContext(AuthContext);
 
 // This MUST match the PORT in server/.env in local development, and resolve dynamically in production
-cconst API_URL = window.location.origin.includes('localhost') && window.location.port !== '5050'
+const API_URL = window.location.origin.includes('localhost') && window.location.port !== '5050'
   ? 'http://localhost:5050/api'
   : 'https://genessence-api.onrender.com/api';
 

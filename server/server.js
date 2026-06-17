@@ -9,7 +9,7 @@ const seedData = require('./seed');
 
 const app = express();
 
-// ── CORS: allow all localhost origins (Vite dev on any port) ──────────────────
+// ── CORS: allow all localhost origins & configured production frontends ───────
 const allowedOrigins = [
   'http://localhost:3000',
   'http://localhost:5173',
@@ -28,13 +28,26 @@ app.use(cors({
   origin: function (origin, callback) {
     // Allow requests with no origin (like curl, mobile apps, Postman)
     if (!origin) return callback(null, true);
-    // Allow any localhost / 127.0.0.1 origin
+    
+    // Allow localhost/127.0.0.1 development environments
     if (origin.startsWith('http://localhost:') || origin.startsWith('http://127.0.0.1:')) {
       return callback(null, true);
     }
+    
+    // Allow explicitly defined frontend URL in production
+    if (process.env.FRONTEND_URL && origin === process.env.FRONTEND_URL) {
+      return callback(null, true);
+    }
+    
+    // Allow any vercel.app subdomain for easy preview/deployments
+    if (origin.endsWith('.vercel.app')) {
+      return callback(null, true);
+    }
+
     if (allowedOrigins.includes(origin)) {
       return callback(null, true);
     }
+    
     callback(new Error(`CORS policy: Origin ${origin} not allowed`));
   },
   credentials: true,
