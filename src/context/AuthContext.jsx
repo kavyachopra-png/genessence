@@ -30,7 +30,7 @@ export const AuthProvider = ({ children }) => {
 
     try {
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 10000); // 10s timeout
+      const timeout = setTimeout(() => controller.abort(), 30000); // 30s timeout (accommodates Render spin up)
 
       const res = await fetch(`${API_URL}/auth/profile`, {
         headers: {
@@ -88,7 +88,7 @@ export const AuthProvider = ({ children }) => {
 
     try {
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 10000);
+      const timeout = setTimeout(() => controller.abort(), 30000); // 30s timeout to allow Render spin-up
 
       const res = await fetch(`${API_URL}/auth/login`, {
         method: 'POST',
