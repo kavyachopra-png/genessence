@@ -1,0 +1,12 @@
+{
+  "name": "genessence-backend",
+  "private": true,
+  "scripts": {
+    "postinstall": "npm --prefix ./server install",
+    "start": "npm --prefix ./server run start",
+    "dev": "npm --prefix ./server run dev",
+    "seed": "npm --prefix ./server run seed",
+    "prisma:generate": "npm --prefix ./server run prisma:generate",
+    "prisma:migrate:deploy": "npm --prefix ./server run prisma:migrate:deploy"
+  }
+}
