@@ -11,7 +11,7 @@ import {
 import * as XLSX from 'xlsx';
 
 const ProjectManagement = () => {
-  const { token, hasRole, API_URL } = useAuth();
+  const { token, hasRole, authFetch } = useAuth();
   const { showToast } = useToast();
   
   const canEdit = hasRole(['admin', 'manager']);
@@ -80,18 +80,17 @@ const ProjectManagement = () => {
         ...(projectNameFilter && { projectName: projectNameFilter })
       });
 
-      const res = await fetch(`${API_URL}/projects?${params.toString()}`, {
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
-      
+      const res = await authFetch(`/projects?${params.toString()}`);
+
       if (!res.ok) throw new Error('Failed to fetch projects');
       const data = await res.json();
-      
+
       setProjects(data.projects);
       setTotal(data.pagination.totalProjects);
       setTotalPages(data.pagination.totalPages);
       setFilterOptions(data.filters || { companies: [], managers: [], spocs: [], projectNames: [] });
     } catch (err) {
+      if (err.message === 'SESSION_EXPIRED') return;
       console.error(err);
       showToast('Error loading project database', 'error');
     } finally {
@@ -101,7 +100,7 @@ const ProjectManagement = () => {
 
   useEffect(() => {
     fetchProjects();
-  }, [page, limit, sortBy, sortOrder, statusFilter, companyFilter, managerFilter, spocFilter, projectNameFilter]);
+  }, [token, page, limit, sortBy, sortOrder, statusFilter, companyFilter, managerFilter, spocFilter, projectNameFilter]);
 
   // Debounced search watcher
   useEffect(() => {
@@ -183,20 +182,17 @@ const ProjectManagement = () => {
     }
 
     try {
-      const url = formType === 'add' ? `${API_URL}/projects` : `${API_URL}/projects/${currentProject._id}`;
+      const path = formType === 'add' ? '/projects' : `/projects/${currentProject._id}`;
       const method = formType === 'add' ? 'POST' : 'PUT';
 
-      const res = await fetch(url, {
+      const res = await authFetch(path, {
         method,
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(formData)
       });
 
       const data = await res.json();
-      
+
       if (res.ok) {
         showToast(formType === 'add' ? 'Project created successfully' : 'Project updated successfully', 'success');
         setIsFormOpen(false);
@@ -205,6 +201,7 @@ const ProjectManagement = () => {
         showToast(data.message || 'Operation failed', 'error');
       }
     } catch (err) {
+      if (err.message === 'SESSION_EXPIRED') return;
       console.error(err);
       showToast('Server connection failed', 'error');
     }
@@ -224,13 +221,12 @@ const ProjectManagement = () => {
     if (!confirmed) return;
 
     try {
-      const res = await fetch(`${API_URL}/projects/${project._id}`, {
-        method: 'DELETE',
-        headers: { 'Authorization': `Bearer ${token}` }
+      const res = await authFetch(`/projects/${project._id}`, {
+        method: 'DELETE'
       });
 
       const data = await res.json();
-      
+
       if (res.ok) {
         showToast('Project and documents deleted successfully', 'success');
         fetchProjects();
@@ -238,6 +234,7 @@ const ProjectManagement = () => {
         showToast(data.message || 'Failed to delete Project', 'error');
       }
     } catch (err) {
+      if (err.message === 'SESSION_EXPIRED') return;
       console.error(err);
       showToast('Server connection failed', 'error');
     }
@@ -247,9 +244,7 @@ const ProjectManagement = () => {
 
   const handleExportExcel = async () => {
     try {
-      const res = await fetch(`${API_URL}/projects/export`, {
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
+      const res = await authFetch(`/projects/export`);
       if (!res.ok) throw new Error('Export query failed');
       const allProjects = await res.json();
 
@@ -275,6 +270,7 @@ const ProjectManagement = () => {
       XLSX.writeFile(wb, `Genessence_Projects_Export_${Date.now()}.xlsx`);
       showToast('Database exported successfully', 'success');
     } catch (err) {
+      if (err.message === 'SESSION_EXPIRED') return;
       console.error(err);
       showToast('Export failed', 'error');
     }
@@ -327,17 +323,14 @@ const ProjectManagement = () => {
     
     try {
       setLoading(true);
-      const res = await fetch(`${API_URL}/projects/import`, {
+      const res = await authFetch(`/projects/import`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ projects: importSummary })
       });
 
       const data = await res.json();
-      
+
       if (res.ok) {
         if (data.errors && data.errors.length > 0) {
           showToast(`Import completed. Success: ${data.successCount}, Failed: ${data.failedCount}.`, 'warning');
@@ -351,6 +344,7 @@ const ProjectManagement = () => {
         showToast(data.message || 'Bulk import failed', 'error');
       }
     } catch (err) {
+      if (err.message === 'SESSION_EXPIRED') return;
       console.error(err);
       showToast('Bulk import request failed', 'error');
     } finally {

@@ -4,10 +4,10 @@ const AuthContext = createContext(null);
 
 export const useAuth = () => useContext(AuthContext);
 
-// This MUST match the PORT in server/.env in local development, and resolve dynamically in production
-const API_URL = window.location.origin.includes('localhost') && window.location.port !== '5050'
-  ? 'http://localhost:5050/api'
-  : 'https://genessence-2.onrender.com/api';
+const API_URL = import.meta.env.VITE_API_URL
+  || (window.location.origin.includes('localhost') && window.location.port !== '5050'
+    ? 'http://localhost:5050/api'
+    : 'https://genessence-2.onrender.com/api');
 
 export const AuthProvider = ({ children }) => {
   const [user, setUser] = useState(null);
@@ -59,7 +59,7 @@ export const AuthProvider = ({ children }) => {
       }
     } catch (err) {
       if (err.name === 'AbortError') {
-        console.error('❌ Profile fetch timed out after 10s');
+        console.error('❌ Profile fetch timed out after 30s');
         setServerDown(true);
       } else {
         console.error('❌ Network error fetching profile:', err.message);
@@ -147,6 +147,44 @@ export const AuthProvider = ({ children }) => {
     setServerDown(false);
   };
 
+  // ── Authenticated fetch wrapper ──────────────────────────────────────────────
+  // Attaches the Bearer token (when present), is FormData-safe (never forces a
+  // Content-Type so the browser keeps the multipart boundary), and auto-evicts
+  // the session on any 401/403 so a stale/invalid token returns the user to Login.
+  // NOTE: `logout` is declared below but is always in scope by the time this runs
+  // (effects/handlers fire after render), so there is no TDZ issue at call time.
+  const authFetch = async (path, options = {}) => {
+    // No token means we can't make an authed call — evict immediately rather than
+    // waiting for a server 401 round-trip. Token hydrates synchronously from
+    // localStorage (useState initializer) and PrivateRoute gates authed pages on
+    // `user`, so this won't fire spuriously during a normal authenticated load.
+    if (!token) {
+      logout();
+      throw new Error('SESSION_EXPIRED');
+    }
+
+    const url = path.startsWith('http') ? path : `${API_URL}${path}`;
+
+    // Shallow-clone options and derive headers from the caller's headers.
+    // Critically, we do NOT set Content-Type — JSON callers already set it and
+    // FormData uploads must keep the browser-generated multipart boundary.
+    const headers = { ...(options.headers || {}) };
+    if (token) {
+      headers['Authorization'] = `Bearer ${token}`;
+    }
+
+    const res = await fetch(url, { ...options, headers });
+
+    if (res.status === 401 || res.status === 403) {
+      // Stale/invalid token (e.g. user no longer exists after the DB migration):
+      // evict the session and stop the caller. PrivateRoute then redirects to Login.
+      logout();
+      throw new Error('SESSION_EXPIRED');
+    }
+
+    return res;
+  };
+
   // ── Role check ─────────────────────────────────────────────────────────────
   const hasRole = (roles) => {
     if (!user) return false;
@@ -162,6 +200,7 @@ export const AuthProvider = ({ children }) => {
     serverDown,
     login,
     logout,
+    authFetch,
     hasRole,
     isAdmin: () => user?.role === 'admin',
     isManager: () => user?.role === 'manager',
@@ -174,7 +213,7 @@ export const AuthProvider = ({ children }) => {
   return (
     <AuthContext.Provider value={value}>
       {/* Server-down banner displayed inside the app layout */}
-      {serverDown && user && (
+      {serverDown && (user || token) && (
         <div className="fixed top-0 left-0 right-0 z-[999] bg-red-600 text-white text-xs font-semibold px-4 py-2 flex items-center justify-between">
           <span>⚠️ Cannot reach server at {API_URL}. Some features may not work. Check if the backend is running.</span>
           <button

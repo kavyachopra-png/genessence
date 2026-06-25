@@ -1,12 +1,14 @@
 const express = require('express');
 const router = express.Router();
 const jwt = require('jsonwebtoken');
-const User = require('../models/User');
+const bcrypt = require('bcryptjs');
+const prisma = require('../lib/prisma');
+const { roleToDb, serializeUser } = require('../utils/serializers');
 const { protect, authorize } = require('../middleware/auth');
 
 // Generate JWT Helper
 const generateToken = (id) => {
-  return jwt.sign({ id }, process.env.JWT_SECRET || 'genessence_secret_key_123', {
+  return jwt.sign({ id }, process.env.JWT_SECRET, {
     expiresIn: '30d'
   });
 };
@@ -22,15 +24,15 @@ router.post('/login', async (req, res) => {
   }
 
   try {
-    const user = await User.findOne({ email });
-    
-    if (user && (await user.comparePassword(password))) {
+    const user = await prisma.user.findUnique({
+      where: { email: String(email).toLowerCase() }
+    });
+
+    if (user && (await bcrypt.compare(password, user.password))) {
+      const safeUser = serializeUser(user);
       res.json({
-        _id: user._id,
-        name: user.name,
-        email: user.email,
-        role: user.role,
-        token: generateToken(user._id)
+        ...safeUser,
+        token: generateToken(user.id)
       });
     } else {
       res.status(401).json({ message: 'Invalid email or password' });
@@ -58,18 +60,23 @@ router.post('/users', protect, authorize('admin'), async (req, res) => {
   }
 
   try {
-    const userExists = await User.findOne({ email });
+    const userExists = await prisma.user.findUnique({
+      where: { email: String(email).toLowerCase() }
+    });
     if (userExists) {
       return res.status(400).json({ message: 'User already exists' });
     }
-    
-    const user = await User.create({ name, email, password, role });
-    res.status(201).json({
-      _id: user._id,
-      name: user.name,
-      email: user.email,
-      role: user.role
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const user = await prisma.user.create({
+      data: {
+        name: String(name).trim(),
+        email: String(email).toLowerCase().trim(),
+        password: hashedPassword,
+        role: roleToDb(role)
+      }
     });
+    res.status(201).json(serializeUser(user));
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -80,8 +87,10 @@ router.post('/users', protect, authorize('admin'), async (req, res) => {
 // @access  Private/Admin
 router.get('/users', protect, authorize('admin'), async (req, res) => {
   try {
-    const users = await User.find({}).select('-password');
-    res.json(users);
+    const users = await prisma.user.findMany({
+      orderBy: { createdAt: 'desc' }
+    });
+    res.json(users.map(serializeUser));
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -92,17 +101,19 @@ router.get('/users', protect, authorize('admin'), async (req, res) => {
 // @access  Private/Admin
 router.delete('/users/:id', protect, authorize('admin'), async (req, res) => {
   try {
-    const user = await User.findById(req.params.id);
+    const user = await prisma.user.findUnique({
+      where: { id: req.params.id }
+    });
     if (!user) {
       return res.status(404).json({ message: 'User not found' });
     }
     
     // Prevent admin from deleting themselves
-    if (user._id.toString() === req.user._id.toString()) {
+    if (user.id === req.user._id) {
       return res.status(400).json({ message: 'You cannot delete yourself' });
     }
 
-    await User.findByIdAndDelete(req.params.id);
+    await prisma.user.delete({ where: { id: req.params.id } });
     res.json({ message: 'User removed successfully' });
   } catch (err) {
     res.status(500).json({ message: err.message });

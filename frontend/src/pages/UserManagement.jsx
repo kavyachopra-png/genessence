@@ -5,7 +5,7 @@ import Loader from '../components/Loader';
 import { UserCheck, Trash2, Plus, Shield, User, X } from 'lucide-react';
 
 const UserManagement = () => {
-  const { token, API_URL } = useAuth();
+  const { token, authFetch } = useAuth();
   const { showToast } = useToast();
 
   const [users, setUsers] = useState([]);
@@ -21,13 +21,12 @@ const UserManagement = () => {
   const fetchUsers = async () => {
     try {
       setLoading(true);
-      const res = await fetch(`${API_URL}/auth/users`, {
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
+      const res = await authFetch(`/auth/users`);
       if (!res.ok) throw new Error('Failed to load users');
       const data = await res.json();
       setUsers(data);
     } catch (err) {
+      if (err.message === 'SESSION_EXPIRED') return;
       console.error(err);
       showToast('Error loading users registry', 'error');
     } finally {
@@ -52,12 +51,9 @@ const UserManagement = () => {
     }
 
     try {
-      const res = await fetch(`${API_URL}/auth/users`, {
+      const res = await authFetch(`/auth/users`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(formData)
       });
 
@@ -72,6 +68,7 @@ const UserManagement = () => {
         showToast(data.message || 'Failed to create user', 'error');
       }
     } catch (err) {
+      if (err.message === 'SESSION_EXPIRED') return;
       console.error(err);
       showToast('Network error during user creation', 'error');
     }
@@ -82,9 +79,8 @@ const UserManagement = () => {
     if (!confirmed) return;
 
     try {
-      const res = await fetch(`${API_URL}/auth/users/${userToDelete._id}`, {
-        method: 'DELETE',
-        headers: { 'Authorization': `Bearer ${token}` }
+      const res = await authFetch(`/auth/users/${userToDelete._id}`, {
+        method: 'DELETE'
       });
 
       const data = await res.json();
@@ -96,6 +92,7 @@ const UserManagement = () => {
         showToast(data.message || 'Deletion failed', 'error');
       }
     } catch (err) {
+      if (err.message === 'SESSION_EXPIRED') return;
       console.error(err);
       showToast('Connection failed', 'error');
     }

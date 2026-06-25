@@ -13,7 +13,7 @@ import {
 import { Link } from 'react-router-dom';
 
 const Dashboard = () => {
-  const { token, API_URL } = useAuth();
+  const { token, authFetch } = useAuth();
   const { showToast } = useToast();
   const [loading, setLoading] = useState(true);
   const [stats, setStats] = useState(null);
@@ -26,21 +26,18 @@ const Dashboard = () => {
   const fetchDashboardData = async () => {
     try {
       setLoading(true);
-      const statsRes = await fetch(`${API_URL}/projects/stats`, {
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
+      const statsRes = await authFetch(`/projects/stats`);
       if (!statsRes.ok) throw new Error('Failed to fetch project statistics');
       const statsData = await statsRes.json();
       setStats(statsData);
 
-      const docsRes = await fetch(`${API_URL}/documents/recent`, {
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
+      const docsRes = await authFetch(`/documents/recent`);
       if (docsRes.ok) {
         const docsData = await docsRes.json();
         setRecentDocs(docsData);
       }
     } catch (err) {
+      if (err.message === 'SESSION_EXPIRED') return;
       console.error(err);
       showToast('Error loading dashboard metrics', 'error');
     } finally {

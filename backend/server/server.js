@@ -3,8 +3,7 @@ const cors = require('cors');
 const path = require('path');
 require('dotenv').config();
 
-const connectDB = require('./config/db');
-const User = require('./models/User');
+const prisma = require('./lib/prisma');
 const seedData = require('./seed');
 
 const app = express();
@@ -111,13 +110,20 @@ app.use((err, req, res, next) => {
 // Connect to Database and Seed if empty, then start server
 const PORT = process.env.PORT || 5050;
 
-connectDB().then(async () => {
+const startServer = async () => {
+  // Fail closed: a missing JWT secret means tokens cannot be safely signed or
+  // verified. Refuse to boot rather than fall back to a guessable default.
+  if (!process.env.JWT_SECRET) {
+    console.error('FATAL: JWT_SECRET is not set. Refusing to start — set JWT_SECRET in the environment.');
+    process.exit(1);
+  }
+
   try {
     const isProduction = process.env.NODE_ENV === 'production';
     const shouldSeed = !isProduction || process.env.SEED_DATABASE === 'true';
 
     if (shouldSeed) {
-      const userCount = await User.countDocuments();
+      const userCount = await prisma.user.count();
       if (userCount === 0) {
         console.log('No users found in database. Running auto-seeding logic...');
         await seedData();
@@ -136,6 +142,18 @@ connectDB().then(async () => {
     console.log(`📋 Health: http://localhost:${PORT}/health`);
     console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}\n`);
   });
-}).catch(err => {
+};
+
+startServer().catch((err) => {
   console.error('Server failed to start due to database error:', err.message);
+  process.exit(1);
 });
+
+const shutdown = async (signal) => {
+  console.log(`\nReceived ${signal}. Closing Prisma connection...`);
+  await prisma.$disconnect();
+  process.exit(0);
+};
+
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));

@@ -49,7 +49,7 @@ const getFileIcon = (type) => {
 
 // ─── Document row inside modal ────────────────────────────────────────────────
 
-function DocRow({ doc, canEdit, canDelete, onDeleted, onUpdated, onPreview, API_URL, token }) {
+function DocRow({ doc, canEdit, canDelete, onDeleted, onUpdated, onPreview, API_URL, token, authFetch }) {
   const { showToast } = useToast();
   const [editing, setEditing] = useState(false);
   const [replacing, setReplacing] = useState(false);
@@ -61,9 +61,9 @@ function DocRow({ doc, canEdit, canDelete, onDeleted, onUpdated, onPreview, API_
     setSaving(true);
     try {
       const tagsArr = editForm.tags.split(',').map(t => t.trim()).filter(Boolean);
-      const res = await fetch(`${API_URL}/documents/${doc._id}`, {
+      const res = await authFetch(`/documents/${doc._id}`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ...editForm, tags: tagsArr })
       });
       const data = await res.json();
@@ -74,7 +74,7 @@ function DocRow({ doc, canEdit, canDelete, onDeleted, onUpdated, onPreview, API_
       } else {
         showToast(data.message || 'Update failed', 'error');
       }
-    } catch { showToast('Connection failed', 'error'); }
+    } catch (err) { if (err.message !== 'SESSION_EXPIRED') showToast('Connection failed', 'error'); }
     finally { setSaving(false); }
   };
 
@@ -86,9 +86,8 @@ function DocRow({ doc, canEdit, canDelete, onDeleted, onUpdated, onPreview, API_
     fd.append('file', file);
     fd.append('versionNote', `Replaced on ${new Date().toLocaleDateString()}`);
     try {
-      const res = await fetch(`${API_URL}/documents/replace/${doc._id}`, {
+      const res = await authFetch(`/documents/replace/${doc._id}`, {
         method: 'POST',
-        headers: { 'Authorization': `Bearer ${token}` },
         body: fd
       });
       const data = await res.json();
@@ -98,7 +97,7 @@ function DocRow({ doc, canEdit, canDelete, onDeleted, onUpdated, onPreview, API_
       } else {
         showToast(data.message || 'Replace failed', 'error');
       }
-    } catch { showToast('Connection failed', 'error'); }
+    } catch (err) { if (err.message !== 'SESSION_EXPIRED') showToast('Connection failed', 'error'); }
     finally { setReplacing(false); e.target.value = ''; }
   };
 
@@ -106,9 +105,8 @@ function DocRow({ doc, canEdit, canDelete, onDeleted, onUpdated, onPreview, API_
     const confirmed = window.confirm(`Permanently delete "${doc.originalName}"?\nThis also removes all version history from disk.`);
     if (!confirmed) return;
     try {
-      const res = await fetch(`${API_URL}/documents/${doc._id}`, {
-        method: 'DELETE',
-        headers: { 'Authorization': `Bearer ${token}` }
+      const res = await authFetch(`/documents/${doc._id}`, {
+        method: 'DELETE'
       });
       if (res.ok) {
         showToast('Document deleted', 'success');
@@ -117,7 +115,7 @@ function DocRow({ doc, canEdit, canDelete, onDeleted, onUpdated, onPreview, API_
         const data = await res.json();
         showToast(data.message || 'Delete failed', 'error');
       }
-    } catch { showToast('Connection failed', 'error'); }
+    } catch (err) { if (err.message !== 'SESSION_EXPIRED') showToast('Connection failed', 'error'); }
   };
 
   const handleDownload = () => {
@@ -288,7 +286,7 @@ function Timeline({ project, docs }) {
 // ─── Main Modal ───────────────────────────────────────────────────────────────
 
 export default function ProjectDetailModal({ project: initialProject, onClose, onEdit, onDelete, onProjectUpdated }) {
-  const { token, hasRole, API_URL } = useAuth();
+  const { token, hasRole, API_URL, authFetch } = useAuth();
   const { showToast } = useToast();
 
   const canEdit = hasRole(['admin', 'manager']);
@@ -323,9 +321,7 @@ export default function ProjectDetailModal({ project: initialProject, onClose, o
     setLoadingDocs(true);
     console.group(`[ProjectDetailModal] Fetching docs for project: ${project.projectName}`);
     try {
-      const res = await fetch(`${API_URL}/projects/${project._id}`, {
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
+      const res = await authFetch(`/projects/${project._id}`);
       if (res.ok) {
         const data = await res.json();
         const docs = data.documents || [];
@@ -336,6 +332,7 @@ export default function ProjectDetailModal({ project: initialProject, onClose, o
         console.error('❌ Failed to fetch project docs:', res.status, errData.message);
       }
     } catch (err) {
+      if (err.message === 'SESSION_EXPIRED') return;
       console.error('❌ Network error fetching docs:', err.message);
     } finally {
       setLoadingDocs(false);
@@ -373,9 +370,8 @@ export default function ProjectDetailModal({ project: initialProject, onClose, o
     modalFiles.forEach(f => fd.append('files', f));
     fd.append('projectId', project._id);
     try {
-      const res = await fetch(`${API_URL}/documents/upload`, {
+      const res = await authFetch(`/documents/upload`, {
         method: 'POST',
-        headers: { 'Authorization': `Bearer ${token}` },
         body: fd
       });
       if (res.ok) {
@@ -386,7 +382,7 @@ export default function ProjectDetailModal({ project: initialProject, onClose, o
         const d = await res.json();
         showToast(d.message || 'Upload failed', 'error');
       }
-    } catch { showToast('Network error', 'error'); }
+    } catch (err) { if (err.message !== 'SESSION_EXPIRED') showToast('Network error', 'error'); }
     finally { setUploading(false); }
   };
 
@@ -640,6 +636,7 @@ export default function ProjectDetailModal({ project: initialProject, onClose, o
                         onPreview={d => { setPreviewDoc(d); setPreviewLoading(true); }}
                         API_URL={API_URL}
                         token={token}
+                        authFetch={authFetch}
                       />
                     ))}
                   </div>

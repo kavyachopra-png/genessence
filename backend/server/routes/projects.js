@@ -1,15 +1,27 @@
 const express = require('express');
 const router = express.Router();
-const Project = require('../models/Project');
-const Document = require('../models/Document');
+const prisma = require('../lib/prisma');
+const { statusToDb, statusFromDb, serializeProject, serializeDocument } = require('../utils/serializers');
 const { protect, authorize } = require('../middleware/auth');
+
+const sortFieldMap = {
+  createdAt: 'createdAt',
+  projectNumber: 'projectNumber',
+  projectName: 'projectName',
+  scopeDoc: 'scopeDoc',
+  projectAmount: 'projectAmount',
+  projectStatus: 'projectStatus',
+  projectManager: 'projectManager',
+  startDate: 'startDate',
+  endDate: 'endDate'
+};
 
 // @route   GET api/projects
 // @desc    Get all projects with search, filter, sorting, and pagination
 // @access  Private
 router.get('/', protect, async (req, res) => {
   try {
-    const { 
+    const {
       page = 1, 
       limit = 10, 
       search = '', 
@@ -22,75 +34,82 @@ router.get('/', protect, async (req, res) => {
       projectName
     } = req.query;
 
-    const query = {};
+    const where = {};
 
-    // Apply text search across relevant fields (projectName, spocs, scopeDoc, etc.)
     if (search) {
-      query.$or = [
-        { projectName: { $regex: search, $options: 'i' } },
-        { spocs: { $regex: search, $options: 'i' } },
-        { scopeDoc: { $regex: search, $options: 'i' } },
-        { projectNumber: { $regex: search, $options: 'i' } },
-        { projectManager: { $regex: search, $options: 'i' } }
+      where.OR = [
+        { projectName: { contains: search, mode: 'insensitive' } },
+        { scopeDoc: { contains: search, mode: 'insensitive' } },
+        { projectNumber: { contains: search, mode: 'insensitive' } },
+        { projectManager: { contains: search, mode: 'insensitive' } }
       ];
     }
 
-    // Apply specific filters
     if (status) {
-      query.projectStatus = status;
+      where.projectStatus = statusToDb(status);
     }
     if (company) {
-      query.scopeDoc = { $regex: company, $options: 'i' };
+      where.scopeDoc = { contains: company, mode: 'insensitive' };
     }
     if (manager) {
-      query.projectManager = { $regex: manager, $options: 'i' };
+      where.projectManager = { contains: manager, mode: 'insensitive' };
     }
     if (spoc) {
-      query.spocs = spoc;
+      where.spocs = { has: spoc };
     }
     if (projectName) {
-      query.projectName = { $regex: projectName, $options: 'i' };
+      where.projectName = { contains: projectName, mode: 'insensitive' };
     }
 
-    // Execute query with sorting and pagination
-    const sortOptions = {};
-    sortOptions[sortBy] = sortOrder === 'asc' ? 1 : -1;
+    const sortField = sortFieldMap[sortBy] || 'createdAt';
+    const sortDirection = sortOrder === 'asc' ? 'asc' : 'desc';
 
-    const totalProjects = await Project.countDocuments(query);
-    const projects = await Project.find(query)
-      .sort(sortOptions)
-      .skip((page - 1) * limit)
-      .limit(Number(limit));
+    const [totalProjects, projects] = await Promise.all([
+      prisma.project.count({ where }),
+      prisma.project.findMany({
+        where,
+        orderBy: { [sortField]: sortDirection },
+        skip: (Number(page) - 1) * Number(limit),
+        take: Number(limit)
+      })
+    ]);
 
-    // Map each project to append its file count from Documents collection
-    const projectsWithCounts = [];
-    for (let proj of projects) {
-      const docCount = await Document.countDocuments({ projectId: proj._id });
-      projectsWithCounts.push({
-        ...proj.toObject(),
-        fileCount: docCount
-      });
-    }
+    const projectIds = projects.map((p) => p.id);
+    const fileCountRows = projectIds.length
+      ? await prisma.document.groupBy({
+          by: ['projectId'],
+          where: { projectId: { in: projectIds } },
+          _count: { _all: true }
+        })
+      : [];
+    const countMap = new Map(fileCountRows.map((row) => [row.projectId, row._count._all]));
 
-    // Get list of unique scope documents, managers, spocs, and project names for filters
-    const companies = await Project.distinct('scopeDoc');
-    const managers = await Project.distinct('projectManager');
-    const spocs = await Project.distinct('spocs');
-    const projectNames = await Project.distinct('projectName');
+    const projectsWithCounts = projects.map((proj) => ({
+      ...serializeProject(proj),
+      fileCount: countMap.get(proj.id) || 0
+    }));
+
+    const [companiesRaw, managersRaw, projectNamesRaw, spocRows] = await Promise.all([
+      prisma.project.findMany({ distinct: ['scopeDoc'], select: { scopeDoc: true } }),
+      prisma.project.findMany({ distinct: ['projectManager'], select: { projectManager: true } }),
+      prisma.project.findMany({ distinct: ['projectName'], select: { projectName: true } }),
+      prisma.project.findMany({ select: { spocs: true } })
+    ]);
+    const spocSet = new Set(spocRows.flatMap((row) => row.spocs));
 
     res.json({
       projects: projectsWithCounts,
       pagination: {
         page: Number(page),
         limit: Number(limit),
-        totalPages: Math.ceil(totalProjects / limit),
+        totalPages: Math.ceil(totalProjects / Number(limit)),
         totalProjects
       },
       filters: {
-        companies,
-        managers,
-        spocs,
-        projectNames
+        companies: companiesRaw.map((x) => x.scopeDoc),
+        managers: managersRaw.map((x) => x.projectManager),
+        spocs: [...spocSet],
+        projectNames: projectNamesRaw.map((x) => x.projectName)
       }
     });
   } catch (err) {
@@ -103,116 +122,96 @@ router.get('/', protect, async (req, res) => {
 // @access  Private
 router.get('/stats', protect, async (req, res) => {
   try {
-    const totalProjects = await Project.countDocuments();
-    
-    // Aggregation for total value
-    const totalValueAgg = await Project.aggregate([
-      { $group: { _id: null, total: { $sum: '$projectAmount' } } }
-    ]);
-    const totalValue = totalValueAgg.length > 0 ? totalValueAgg[0].total : 0;
-
-    // Aggregation for active projects value (In Progress)
-    const activeValueAgg = await Project.aggregate([
-      { $match: { projectStatus: 'In Progress' } },
-      { $group: { _id: null, total: { $sum: '$projectAmount' } } }
-    ]);
-    const activeValue = activeValueAgg.length > 0 ? activeValueAgg[0].total : 0;
-
-    // Aggregation for completed projects value (Completed)
-    const completedValueAgg = await Project.aggregate([
-      { $match: { projectStatus: 'Completed' } },
-      { $group: { _id: null, total: { $sum: '$projectAmount' } } }
-    ]);
-    const completedValue = completedValueAgg.length > 0 ? completedValueAgg[0].total : 0;
-
-    // Aggregation for pending projects value (Planning, On Hold, Cancelled)
-    const pendingValueAgg = await Project.aggregate([
-      { $match: { projectStatus: { $nin: ['In Progress', 'Completed'] } } },
-      { $group: { _id: null, total: { $sum: '$projectAmount' } } }
-    ]);
-    const pendingValue = pendingValueAgg.length > 0 ? pendingValueAgg[0].total : 0;
-
-    // Count projects in each state
-    const activeCount = await Project.countDocuments({ projectStatus: 'In Progress' });
-    const completedCount = await Project.countDocuments({ projectStatus: 'Completed' });
-    const pendingCount = await Project.countDocuments({ projectStatus: { $nin: ['In Progress', 'Completed'] } });
-
-    // Aggregation for distinct SPOCs count
-    const distinctSpocs = await Project.distinct('spocs');
-    const totalSpocs = distinctSpocs.length;
-
-    // Aggregation for distinct scope docs count
-    const distinctScopeDocs = await Project.distinct('scopeDoc');
-    const totalCompanies = distinctScopeDocs.length;
-
-    // Aggregation for projects by status
-    const statusCounts = await Project.aggregate([
-      { $group: { _id: '$projectStatus', count: { $sum: 1 } } }
+    const [
+      totalProjects,
+      totalValueAgg,
+      activeValueAgg,
+      completedValueAgg,
+      pendingValueAgg,
+      activeCount,
+      completedCount,
+      pendingCount,
+      statusCountsRaw,
+      managerCountsRaw,
+      recentProjects,
+      spocRows,
+      companyRows
+    ] = await Promise.all([
+      prisma.project.count(),
+      prisma.project.aggregate({ _sum: { projectAmount: true } }),
+      prisma.project.aggregate({ where: { projectStatus: 'InProgress' }, _sum: { projectAmount: true } }),
+      prisma.project.aggregate({ where: { projectStatus: 'Completed' }, _sum: { projectAmount: true } }),
+      prisma.project.aggregate({
+        where: { projectStatus: { in: ['Planning', 'OnHold', 'Cancelled'] } },
+        _sum: { projectAmount: true }
+      }),
+      prisma.project.count({ where: { projectStatus: 'InProgress' } }),
+      prisma.project.count({ where: { projectStatus: 'Completed' } }),
+      prisma.project.count({ where: { projectStatus: { in: ['Planning', 'OnHold', 'Cancelled'] } } }),
+      prisma.project.groupBy({ by: ['projectStatus'], _count: { _all: true } }),
+      prisma.project.groupBy({
+        by: ['projectManager'],
+        _count: { _all: true },
+        _sum: { projectAmount: true },
+        orderBy: { _count: { projectManager: 'desc' } },
+        take: 5
+      }),
+      prisma.project.findMany({ orderBy: { createdAt: 'desc' }, take: 5 }),
+      prisma.project.findMany({ select: { spocs: true } }),
+      prisma.project.findMany({ distinct: ['scopeDoc'], select: { scopeDoc: true } })
     ]);
 
-    // Aggregation for projects by manager
-    const managerCounts = await Project.aggregate([
-      { $group: { _id: '$projectManager', count: { $sum: 1 }, totalValue: { $sum: '$projectAmount' } } },
-      { $sort: { count: -1 } },
-      { $limit: 5 }
-    ]);
-
-    // Aggregation for monthly value trends
     const sixMonthsAgo = new Date();
     sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 5);
     sixMonthsAgo.setDate(1);
-    
-    const monthlyTrends = await Project.aggregate([
-      { $match: { startDate: { $gte: sixMonthsAgo } } },
-      {
-        $group: {
-          _id: {
-            year: { $year: '$startDate' },
-            month: { $month: '$startDate' }
-          },
-          totalAmount: { $sum: '$projectAmount' },
-          count: { $sum: 1 }
-        }
-      },
-      { $sort: { '_id.year': 1, '_id.month': 1 } }
-    ]);
+
+    const monthlyTrends = await prisma.$queryRaw`
+      SELECT
+        DATE_TRUNC('month', "startDate") AS month,
+        SUM("projectAmount")::float8 AS "totalAmount",
+        COUNT(*)::int AS count
+      FROM "Project"
+      WHERE "startDate" >= ${sixMonthsAgo}
+      GROUP BY DATE_TRUNC('month', "startDate")
+      ORDER BY DATE_TRUNC('month', "startDate") ASC
+    `;
 
     const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
     const formattedTrends = monthlyTrends.map(trend => {
-      const monthIndex = trend._id.month - 1;
+      const monthDate = new Date(trend.month);
+      const monthIndex = monthDate.getMonth();
       return {
-        month: `${monthNames[monthIndex]} ${trend._id.year}`,
-        value: trend.totalAmount,
+        month: `${monthNames[monthIndex]} ${monthDate.getFullYear()}`,
+        value: Number(trend.totalAmount || 0),
         projectsCount: trend.count
       };
     });
 
-    const recentProjects = await Project.find()
-      .sort({ createdAt: -1 })
-      .limit(5);
+    const totalSpocs = new Set(spocRows.flatMap((row) => row.spocs)).size;
+    const totalCompanies = companyRows.length;
 
     res.json({
       totalProjects,
       totalSpocs,
       totalCompanies,
-      totalValue,
-      activeValue,
-      completedValue,
-      pendingValue,
+      totalValue: totalValueAgg._sum.projectAmount || 0,
+      activeValue: activeValueAgg._sum.projectAmount || 0,
+      completedValue: completedValueAgg._sum.projectAmount || 0,
+      pendingValue: pendingValueAgg._sum.projectAmount || 0,
       activeCount,
       completedCount,
       pendingCount,
-      statusCounts: statusCounts.reduce((acc, curr) => {
-        acc[curr._id] = curr.count;
+      statusCounts: statusCountsRaw.reduce((acc, curr) => {
+        acc[statusFromDb(curr.projectStatus)] = curr._count._all;
         return acc;
       }, {}),
-      managerCounts: managerCounts.map(m => ({
-        manager: m._id,
-        count: m.count,
-        totalValue: m.totalValue
+      managerCounts: managerCountsRaw.map(m => ({
+        manager: m.projectManager,
+        count: m._count._all,
+        totalValue: m._sum.projectAmount || 0
       })),
       monthlyTrends: formattedTrends,
-      recentProjects
+      recentProjects: recentProjects.map(serializeProject)
     });
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -224,8 +223,10 @@ router.get('/stats', protect, async (req, res) => {
 // @access  Private
 router.get('/export', protect, async (req, res) => {
   try {
-    const projects = await Project.find({}).sort({ createdAt: -1 });
-    res.json(projects);
+    const projects = await prisma.project.findMany({
+      orderBy: { createdAt: 'desc' }
+    });
+    res.json(projects.map(serializeProject));
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -236,17 +237,22 @@ router.get('/export', protect, async (req, res) => {
 // @access  Private
 router.get('/:id', protect, async (req, res) => {
   try {
-    const project = await Project.findById(req.params.id);
+    const project = await prisma.project.findUnique({
+      where: { id: req.params.id }
+    });
     if (!project) {
       return res.status(404).json({ message: 'Project not found' });
     }
-    
-    // Find documents attached to this project
-    const documents = await Document.find({ projectId: project._id }).sort({ uploadedAt: -1 });
-    
+
+    const documents = await prisma.document.findMany({
+      where: { projectId: project.id },
+      include: { versions: { orderBy: { uploadedAt: 'desc' } } },
+      orderBy: { uploadedAt: 'desc' }
+    });
+
     res.json({
-      ...project.toObject(),
-      documents
+      ...serializeProject(project),
+      documents: documents.map(serializeDocument)
     });
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -275,25 +281,29 @@ router.post('/', protect, authorize(['admin', 'manager']), async (req, res) => {
   }
 
   try {
-    const numExists = await Project.findOne({ projectNumber });
+    const numExists = await prisma.project.findUnique({
+      where: { projectNumber }
+    });
     if (numExists) {
       return res.status(400).json({ message: 'Project number must be unique' });
     }
 
-    const project = await Project.create({
-      projectName,
-      spocs,
-      scopeDoc,
-      projectNumber,
-      projectAmount: Number(projectAmount),
-      projectStatus,
-      projectManager,
-      description,
-      startDate,
-      endDate
+    const project = await prisma.project.create({
+      data: {
+        projectName,
+        spocs,
+        scopeDoc,
+        projectNumber,
+        projectAmount: Number(projectAmount),
+        projectStatus: statusToDb(projectStatus || 'Planning'),
+        projectManager,
+        description: description || '',
+        startDate: new Date(startDate),
+        endDate: new Date(endDate)
+      }
     });
 
-    res.status(201).json(project);
+    res.status(201).json(serializeProject(project));
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -334,7 +344,9 @@ router.post('/import', protect, authorize(['admin', 'manager']), async (req, res
         continue;
       }
 
-      const existingProject = await Project.findOne({ projectNumber: String(p.projectNumber) });
+      const existingProject = await prisma.project.findUnique({
+        where: { projectNumber: String(p.projectNumber) }
+      });
       if (existingProject) {
         errors.push(`Row ${i + 1}: Project Number '${p.projectNumber}' already exists.`);
         continue;
@@ -344,19 +356,20 @@ router.post('/import', protect, authorize(['admin', 'manager']), async (req, res
       const end = new Date(p.endDate || new Date());
 
       try {
-        const newProj = new Project({
-          projectName: name,
-          spocs: spocsList,
-          scopeDoc: p.scopeDoc,
-          projectNumber: String(p.projectNumber),
-          projectAmount: Number(p.projectAmount),
-          projectStatus: p.projectStatus || 'Planning',
-          projectManager: p.projectManager,
-          description: p.description || '',
-          startDate: isNaN(start.getTime()) ? new Date() : start,
-          endDate: isNaN(end.getTime()) ? new Date() : end
+        const newProj = await prisma.project.create({
+          data: {
+            projectName: name,
+            spocs: spocsList,
+            scopeDoc: p.scopeDoc,
+            projectNumber: String(p.projectNumber),
+            projectAmount: Number(p.projectAmount),
+            projectStatus: statusToDb(p.projectStatus || 'Planning'),
+            projectManager: p.projectManager,
+            description: p.description || '',
+            startDate: isNaN(start.getTime()) ? new Date() : start,
+            endDate: isNaN(end.getTime()) ? new Date() : end
+          }
         });
-        await newProj.save();
         importedProjects.push(newProj);
       } catch (saveErr) {
         errors.push(`Row ${i + 1}: Save error - ${saveErr.message}`);
@@ -378,7 +391,9 @@ router.post('/import', protect, authorize(['admin', 'manager']), async (req, res
 // @access  Private (Admin, Manager)
 router.put('/:id', protect, authorize(['admin', 'manager']), async (req, res) => {
   try {
-    const project = await Project.findById(req.params.id);
+    const project = await prisma.project.findUnique({
+      where: { id: req.params.id }
+    });
     if (!project) {
       return res.status(404).json({ message: 'Project not found' });
     }
@@ -396,26 +411,33 @@ router.put('/:id', protect, authorize(['admin', 'manager']), async (req, res) =>
       endDate
     } = req.body;
 
+    let nextProjectNumber = project.projectNumber;
     if (projectNumber && projectNumber !== project.projectNumber) {
-      const numExists = await Project.findOne({ projectNumber });
+      const numExists = await prisma.project.findUnique({
+        where: { projectNumber }
+      });
       if (numExists) {
         return res.status(400).json({ message: 'Project number must be unique' });
       }
-      project.projectNumber = projectNumber;
+      nextProjectNumber = projectNumber;
     }
 
-    if (projectName) project.projectName = projectName;
-    if (spocs && Array.isArray(spocs) && spocs.length > 0) project.spocs = spocs;
-    project.scopeDoc = scopeDoc || project.scopeDoc;
-    project.projectAmount = projectAmount !== undefined ? Number(projectAmount) : project.projectAmount;
-    project.projectStatus = projectStatus || project.projectStatus;
-    project.projectManager = projectManager || project.projectManager;
-    project.description = description !== undefined ? description : project.description;
-    project.startDate = startDate || project.startDate;
-    project.endDate = endDate || project.endDate;
-
-    const updatedProject = await project.save();
-    res.json(updatedProject);
+    const updatedProject = await prisma.project.update({
+      where: { id: req.params.id },
+      data: {
+        projectName: projectName || project.projectName,
+        spocs: spocs && Array.isArray(spocs) && spocs.length > 0 ? spocs : project.spocs,
+        scopeDoc: scopeDoc || project.scopeDoc,
+        projectNumber: nextProjectNumber,
+        projectAmount: projectAmount !== undefined ? Number(projectAmount) : project.projectAmount,
+        projectStatus: projectStatus ? statusToDb(projectStatus) : project.projectStatus,
+        projectManager: projectManager || project.projectManager,
+        description: description !== undefined ? description : project.description,
+        startDate: startDate ? new Date(startDate) : project.startDate,
+        endDate: endDate ? new Date(endDate) : project.endDate
+      }
+    });
+    res.json(serializeProject(updatedProject));
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -427,21 +449,28 @@ router.put('/:id', protect, authorize(['admin', 'manager']), async (req, res) =>
 router.delete('/:id', protect, authorize('admin'), async (req, res) => {
   const fs = require('fs');
   try {
-    const project = await Project.findById(req.params.id);
+    const project = await prisma.project.findUnique({
+      where: { id: req.params.id }
+    });
     if (!project) {
       return res.status(404).json({ message: 'Project not found' });
     }
 
-    // Find and delete attached documents files from disk and database
-    const documents = await Document.find({ projectId: project._id });
+    const documents = await prisma.document.findMany({
+      where: { projectId: project.id },
+      include: { versions: true }
+    });
     for (const doc of documents) {
       if (fs.existsSync(doc.filePath)) {
         fs.unlinkSync(doc.filePath);
       }
+      for (const ver of doc.versions) {
+        if (ver.filePath && fs.existsSync(ver.filePath)) {
+          try { fs.unlinkSync(ver.filePath); } catch (_) {}
+        }
+      }
     }
-    await Document.deleteMany({ projectId: project._id });
-
-    await Project.findByIdAndDelete(req.params.id);
+    await prisma.project.delete({ where: { id: req.params.id } });
     res.json({ message: 'Project and all attached documents removed successfully' });
   } catch (err) {
     res.status(500).json({ message: err.message });

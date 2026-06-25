@@ -1,5 +1,6 @@
 const jwt = require('jsonwebtoken');
-const User = require('../models/User');
+const prisma = require('../lib/prisma');
+const { serializeUser } = require('../utils/serializers');
 
 const protect = async (req, res, next) => {
   let token;
@@ -12,13 +13,16 @@ const protect = async (req, res, next) => {
 
   if (token) {
     try {
-      const decoded = jwt.verify(token, process.env.JWT_SECRET || 'genessence_secret_key_123');
-      
-      // Get user from database, exclude password
-      req.user = await User.findById(decoded.id).select('-password');
-      if (!req.user) {
+      const decoded = jwt.verify(token, process.env.JWT_SECRET);
+      const user = await prisma.user.findUnique({
+        where: { id: decoded.id }
+      });
+
+      if (!user) {
         return res.status(401).json({ message: 'User not found' });
       }
+
+      req.user = serializeUser(user);
       
       next();
     } catch (err) {

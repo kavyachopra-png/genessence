@@ -3,8 +3,8 @@ const router = express.Router();
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
-const Document = require('../models/Document');
-const Project = require('../models/Project');
+const prisma = require('../lib/prisma');
+const { serializeDocument } = require('../utils/serializers');
 const { protect, authorize } = require('../middleware/auth');
 
 // Setup storage directory
@@ -69,7 +69,9 @@ router.post('/upload', protect, authorize(['admin', 'manager']), (req, res) => {
     }
 
     try {
-      const project = await Project.findById(projectId);
+      const project = await prisma.project.findUnique({
+        where: { id: projectId }
+      });
       if (!project) {
         req.files.forEach(file => {
           if (fs.existsSync(file.path)) fs.unlinkSync(file.path);
@@ -79,16 +81,29 @@ router.post('/upload', protect, authorize(['admin', 'manager']), (req, res) => {
 
       const uploadedDocs = [];
       for (const file of req.files) {
-        const doc = await Document.create({
-          projectId,
-          fileName: file.filename,
-          originalName: file.originalname,
-          filePath: file.path,
-          fileType: path.extname(file.originalname).toLowerCase(),
-          fileSize: file.size,
-          uploadedBy: req.user.name
+        const doc = await prisma.document.create({
+          data: {
+            projectId,
+            fileName: file.filename,
+            originalName: file.originalname,
+            filePath: file.path,
+            fileType: path.extname(file.originalname).toLowerCase(),
+            fileSize: file.size,
+            uploadedBy: req.user.name
+          },
+          include: {
+            project: {
+              select: {
+                id: true,
+                projectName: true,
+                projectNumber: true,
+                spocs: true
+              }
+            },
+            versions: { orderBy: { uploadedAt: 'desc' } }
+          }
         });
-        uploadedDocs.push(doc);
+        uploadedDocs.push(serializeDocument(doc));
       }
 
       res.status(201).json(uploadedDocs);
@@ -114,14 +129,26 @@ router.get('/', protect, async (req, res) => {
     }
 
     if (search) {
-      query.originalName = { $regex: search, $options: 'i' };
+      query.originalName = { contains: search, mode: 'insensitive' };
     }
 
-    const documents = await Document.find(query)
-      .populate('projectId', 'projectName spocs')
-      .sort({ uploadedAt: -1 });
+    const documents = await prisma.document.findMany({
+      where: query,
+      include: {
+        project: {
+          select: {
+            id: true,
+            projectName: true,
+            projectNumber: true,
+            spocs: true
+          }
+        },
+        versions: { orderBy: { uploadedAt: 'desc' } }
+      },
+      orderBy: { uploadedAt: 'desc' }
+    });
 
-    res.json(documents);
+    res.json(documents.map(serializeDocument));
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -132,11 +159,22 @@ router.get('/', protect, async (req, res) => {
 // @access  Private
 router.get('/recent', protect, async (req, res) => {
   try {
-    const documents = await Document.find({})
-      .populate('projectId', 'projectName spocs')
-      .sort({ uploadedAt: -1 })
-      .limit(5);
-    res.json(documents);
+    const documents = await prisma.document.findMany({
+      include: {
+        project: {
+          select: {
+            id: true,
+            projectName: true,
+            projectNumber: true,
+            spocs: true
+          }
+        },
+        versions: { orderBy: { uploadedAt: 'desc' } }
+      },
+      orderBy: { uploadedAt: 'desc' },
+      take: 5
+    });
+    res.json(documents.map(serializeDocument));
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -147,7 +185,9 @@ router.get('/recent', protect, async (req, res) => {
 // @access  Private
 router.get('/download/:id', protect, async (req, res) => {
   try {
-    const doc = await Document.findById(req.params.id);
+    const doc = await prisma.document.findUnique({
+      where: { id: req.params.id }
+    });
     if (!doc) {
       return res.status(404).json({ message: 'Document not found' });
     }
@@ -167,7 +207,9 @@ router.get('/download/:id', protect, async (req, res) => {
 // @access  Private
 router.get('/preview/:id', protect, async (req, res) => {
   try {
-    const doc = await Document.findById(req.params.id);
+    const doc = await prisma.document.findUnique({
+      where: { id: req.params.id }
+    });
     if (!doc) {
       return res.status(404).json({ message: 'Document not found' });
     }
@@ -203,12 +245,24 @@ router.get('/preview/:id', protect, async (req, res) => {
 // @access  Private
 router.get('/:id', protect, async (req, res) => {
   try {
-    const doc = await Document.findById(req.params.id)
-      .populate('projectId', 'projectName projectNumber spocs');
+    const doc = await prisma.document.findUnique({
+      where: { id: req.params.id },
+      include: {
+        project: {
+          select: {
+            id: true,
+            projectName: true,
+            projectNumber: true,
+            spocs: true
+          }
+        },
+        versions: { orderBy: { uploadedAt: 'desc' } }
+      }
+    });
     if (!doc) {
       return res.status(404).json({ message: 'Document not found' });
     }
-    res.json(doc);
+    res.json(serializeDocument(doc));
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -219,7 +273,9 @@ router.get('/:id', protect, async (req, res) => {
 // @access  Private (Admin, Manager)
 router.put('/:id', protect, authorize(['admin', 'manager']), async (req, res) => {
   try {
-    const doc = await Document.findById(req.params.id);
+    const doc = await prisma.document.findUnique({
+      where: { id: req.params.id }
+    });
     if (!doc) {
       return res.status(404).json({ message: 'Document not found' });
     }
@@ -227,22 +283,39 @@ router.put('/:id', protect, authorize(['admin', 'manager']), async (req, res) =>
     const { originalName, description, tags, versionNote, projectId } = req.body;
 
     // If moving to a different project, verify that project exists
+    let nextProjectId = doc.projectId;
     if (projectId && projectId !== String(doc.projectId)) {
-      const projectExists = await Project.findById(projectId);
+      const projectExists = await prisma.project.findUnique({
+        where: { id: projectId }
+      });
       if (!projectExists) {
         return res.status(404).json({ message: 'Target project not found' });
       }
-      doc.projectId = projectId;
+      nextProjectId = projectId;
     }
 
-    if (originalName && originalName.trim()) doc.originalName = originalName.trim();
-    if (description !== undefined) doc.description = description;
-    if (Array.isArray(tags)) doc.tags = tags.map(t => String(t).trim()).filter(Boolean);
-    if (versionNote !== undefined) doc.versionNote = versionNote;
-
-    const updated = await doc.save();
-    const populated = await updated.populate('projectId', 'projectName projectNumber spocs');
-    res.json(populated);
+    const updated = await prisma.document.update({
+      where: { id: req.params.id },
+      data: {
+        projectId: nextProjectId,
+        originalName: originalName && originalName.trim() ? originalName.trim() : doc.originalName,
+        description: description !== undefined ? description : doc.description,
+        tags: Array.isArray(tags) ? tags.map((t) => String(t).trim()).filter(Boolean) : doc.tags,
+        versionNote: versionNote !== undefined ? versionNote : doc.versionNote
+      },
+      include: {
+        project: {
+          select: {
+            id: true,
+            projectName: true,
+            projectNumber: true,
+            spocs: true
+          }
+        },
+        versions: { orderBy: { uploadedAt: 'desc' } }
+      }
+    });
+    res.json(serializeDocument(updated));
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -264,35 +337,51 @@ router.post('/replace/:id', protect, authorize(['admin', 'manager']), (req, res)
     }
 
     try {
-      const doc = await Document.findById(req.params.id);
+      const doc = await prisma.document.findUnique({
+        where: { id: req.params.id }
+      });
       if (!doc) {
         if (fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
         return res.status(404).json({ message: 'Document not found' });
       }
 
-      // Archive the current version into history
-      doc.versions.push({
-        fileName: doc.fileName,
-        filePath: doc.filePath,
-        fileSize: doc.fileSize,
-        fileType: doc.fileType,
-        uploadedBy: doc.uploadedBy,
-        uploadedAt: doc.uploadedAt,
-        versionNote: req.body.versionNote || `Replaced on ${new Date().toLocaleDateString()}`
+      await prisma.documentVersion.create({
+        data: {
+          documentId: doc.id,
+          fileName: doc.fileName,
+          filePath: doc.filePath,
+          fileSize: doc.fileSize,
+          fileType: doc.fileType,
+          uploadedBy: doc.uploadedBy,
+          uploadedAt: doc.uploadedAt,
+          versionNote: req.body.versionNote || `Replaced on ${new Date().toLocaleDateString()}`
+        }
       });
 
-      // Update with new file details
-      doc.fileName = req.file.filename;
-      doc.filePath = req.file.path;
-      doc.fileSize = req.file.size;
-      doc.fileType = path.extname(req.file.originalname).toLowerCase();
-      doc.uploadedBy = req.user.name;
-      doc.uploadedAt = new Date();
-      if (req.body.originalName) doc.originalName = req.body.originalName;
-
-      const updated = await doc.save();
-      const populated = await updated.populate('projectId', 'projectName projectNumber spocs');
-      res.json(populated);
+      const updated = await prisma.document.update({
+        where: { id: doc.id },
+        data: {
+          fileName: req.file.filename,
+          filePath: req.file.path,
+          fileSize: req.file.size,
+          fileType: path.extname(req.file.originalname).toLowerCase(),
+          uploadedBy: req.user.name,
+          uploadedAt: new Date(),
+          originalName: req.body.originalName || doc.originalName
+        },
+        include: {
+          project: {
+            select: {
+              id: true,
+              projectName: true,
+              projectNumber: true,
+              spocs: true
+            }
+          },
+          versions: { orderBy: { uploadedAt: 'desc' } }
+        }
+      });
+      res.json(serializeDocument(updated));
     } catch (saveErr) {
       if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
       res.status(500).json({ message: saveErr.message });
@@ -305,8 +394,10 @@ router.post('/replace/:id', protect, authorize(['admin', 'manager']), (req, res)
 // @access  Private (Admin only)
 router.delete('/:id', protect, authorize('admin'), async (req, res) => {
   try {
-    // FIX: was `docId = req.params.id` — implicit global variable bug
-    const doc = await Document.findById(req.params.id);
+    const doc = await prisma.document.findUnique({
+      where: { id: req.params.id },
+      include: { versions: true }
+    });
     if (!doc) {
       return res.status(404).json({ message: 'Document not found' });
     }
@@ -323,7 +414,7 @@ router.delete('/:id', protect, authorize('admin'), async (req, res) => {
       }
     }
 
-    await Document.findByIdAndDelete(req.params.id);
+    await prisma.document.delete({ where: { id: req.params.id } });
     res.json({ message: 'Document removed successfully' });
   } catch (err) {
     res.status(500).json({ message: err.message });

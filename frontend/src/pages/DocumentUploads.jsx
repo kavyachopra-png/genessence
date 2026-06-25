@@ -9,7 +9,7 @@ import {
 } from 'lucide-react';
 
 const DocumentUploads = () => {
-  const { token, hasRole, API_URL } = useAuth();
+  const { token, hasRole, API_URL, authFetch } = useAuth();
   const { showToast } = useToast();
 
   const canUpload = hasRole(['admin', 'manager']);
@@ -50,13 +50,12 @@ const DocumentUploads = () => {
         ...(projectFilter && { projectId: projectFilter }),
         search
       });
-      const res = await fetch(`${API_URL}/documents?${params.toString()}`, {
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
+      const res = await authFetch(`/documents?${params.toString()}`);
       if (!res.ok) throw new Error('Failed to fetch documents list');
       const data = await res.json();
       setDocuments(data);
     } catch (err) {
+      if (err.message === 'SESSION_EXPIRED') return;
       console.error(err);
       showToast('Error loading documents list', 'error');
     }
@@ -64,14 +63,13 @@ const DocumentUploads = () => {
 
   const fetchProjects = async () => {
     try {
-      const res = await fetch(`${API_URL}/projects?limit=100`, {
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
+      const res = await authFetch(`/projects?limit=100`);
       if (res.ok) {
         const data = await res.json();
         setProjects(data.projects);
       }
     } catch (err) {
+      if (err.message === 'SESSION_EXPIRED') return;
       console.error('Error fetching projects dropdown:', err);
     }
   };
@@ -155,9 +153,8 @@ const DocumentUploads = () => {
     formData.append('projectId', selectedProjectId);
 
     try {
-      const res = await fetch(`${API_URL}/documents/upload`, {
+      const res = await authFetch(`/documents/upload`, {
         method: 'POST',
-        headers: { 'Authorization': `Bearer ${token}` },
         body: formData
       });
       const data = await res.json();
@@ -170,6 +167,7 @@ const DocumentUploads = () => {
         showToast(data.message || 'File upload failed', 'error');
       }
     } catch (err) {
+      if (err.message === 'SESSION_EXPIRED') return;
       console.error(err);
       showToast('Network error during upload', 'error');
     } finally {
@@ -202,9 +200,8 @@ const DocumentUploads = () => {
     const confirmed = window.confirm(`Permanently delete "${doc.originalName}"?\nThis removes the file from disk and all version history.`);
     if (!confirmed) return;
     try {
-      const res = await fetch(`${API_URL}/documents/${doc._id}`, {
-        method: 'DELETE',
-        headers: { 'Authorization': `Bearer ${token}` }
+      const res = await authFetch(`/documents/${doc._id}`, {
+        method: 'DELETE'
       });
       if (res.ok) {
         showToast('Document deleted successfully', 'success');
@@ -214,6 +211,7 @@ const DocumentUploads = () => {
         showToast(data.message || 'Failed to delete file', 'error');
       }
     } catch (err) {
+      if (err.message === 'SESSION_EXPIRED') return;
       console.error(err);
       showToast('Connection failed', 'error');
     }
@@ -241,9 +239,9 @@ const DocumentUploads = () => {
     setSavingEdit(true);
     try {
       const tagsArr = editForm.tags.split(',').map(t => t.trim()).filter(Boolean);
-      const res = await fetch(`${API_URL}/documents/${docId}`, {
+      const res = await authFetch(`/documents/${docId}`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ ...editForm, tags: tagsArr })
       });
       const data = await res.json();
@@ -254,7 +252,7 @@ const DocumentUploads = () => {
       } else {
         showToast(data.message || 'Update failed', 'error');
       }
-    } catch { showToast('Connection failed', 'error'); }
+    } catch (err) { if (err.message !== 'SESSION_EXPIRED') showToast('Connection failed', 'error'); }
     finally { setSavingEdit(false); }
   };
 
@@ -267,9 +265,8 @@ const DocumentUploads = () => {
     fd.append('file', file);
     fd.append('versionNote', `Replaced on ${new Date().toLocaleDateString()}`);
     try {
-      const res = await fetch(`${API_URL}/documents/replace/${docId}`, {
+      const res = await authFetch(`/documents/replace/${docId}`, {
         method: 'POST',
-        headers: { 'Authorization': `Bearer ${token}` },
         body: fd
       });
       const data = await res.json();
@@ -279,7 +276,7 @@ const DocumentUploads = () => {
       } else {
         showToast(data.message || 'Replace failed', 'error');
       }
-    } catch { showToast('Connection failed', 'error'); }
+    } catch (err) { if (err.message !== 'SESSION_EXPIRED') showToast('Connection failed', 'error'); }
     finally { if (e.target) e.target.value = ''; }
   };
 

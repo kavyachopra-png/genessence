@@ -1,6 +1,7 @@
-const User = require('./models/User');
-const Project = require('./models/Project');
-const Document = require('./models/Document');
+require('dotenv').config();
+const bcrypt = require('bcryptjs');
+const prisma = require('./lib/prisma');
+const { roleToDb, statusToDb } = require('./utils/serializers');
 
 const users = [
   {
@@ -146,27 +147,71 @@ const projects = [
   }
 ];
 
-const seedData = async () => {
+// Parse the target host from DATABASE_URL, masking any embedded password,
+// so a destructive run clearly announces what it is about to wipe.
+const describeTarget = () => {
+  const raw = process.env.DATABASE_URL;
+  if (!raw) return '(DATABASE_URL not set)';
   try {
-    // Clear existing data
-    await User.deleteMany();
-    await Project.deleteMany();
-    await Document.deleteMany();
-    console.log('Purging existing database records...');
+    const url = new URL(raw);
+    if (url.password) url.password = '****';
+    const auth = url.username ? `${url.username}${url.password ? ':' + url.password : ''}@` : '';
+    const db = url.pathname || '';
+    return `${url.protocol}//${auth}${url.host}${db}`;
+  } catch (_e) {
+    // Fall back to a coarse mask if the URL is not parseable.
+    return raw.replace(/:\/\/([^:@/]+):[^@/]+@/, '://$1:****@');
+  }
+};
 
-    // Seed Users
-    const seededUsers = [];
-    for (const u of users) {
-      const newUser = new User(u);
-      await newUser.save();
-      seededUsers.push(newUser);
+const seedData = async ({ reset = false } = {}) => {
+  try {
+    if (reset) {
+      console.warn(`⚠️  DESTRUCTIVE SEED (--reset): purging ALL records on target → ${describeTarget()}`);
+      await prisma.documentVersion.deleteMany();
+      await prisma.document.deleteMany();
+      await prisma.project.deleteMany();
+      await prisma.user.deleteMany();
+      console.log('Purging existing database records...');
     }
-    console.log(`Successfully seeded ${seededUsers.length} users:`);
-    seededUsers.forEach(u => console.log(` - Role [${u.role}]: ${u.email} (password: ${u.password})`));
 
-    // Seed Projects
-    const seededProjects = await Project.insertMany(projects);
-    console.log(`Successfully seeded ${seededProjects.length} projects.`);
+    let usersCreated = 0;
+    for (const user of users) {
+      const email = user.email.toLowerCase();
+      const existing = await prisma.user.findUnique({ where: { email } });
+      if (existing) {
+        console.log(` - Role [${user.role}]: ${email} (exists, untouched)`);
+        continue;
+      }
+      await prisma.user.create({
+        data: {
+          name: user.name,
+          email,
+          password: await bcrypt.hash(user.password, 10),
+          role: roleToDb(user.role)
+        }
+      });
+      usersCreated += 1;
+      console.log(` - Role [${user.role}]: ${email} (created, password: ${user.password})`);
+    }
+    console.log(`Users: ${usersCreated} created, ${users.length - usersCreated} already existed.`);
+
+    let projectsCreated = 0;
+    for (const project of projects) {
+      const existing = await prisma.project.findUnique({
+        where: { projectNumber: project.projectNumber }
+      });
+      await prisma.project.upsert({
+        where: { projectNumber: project.projectNumber },
+        update: {},
+        create: {
+          ...project,
+          projectStatus: statusToDb(project.projectStatus)
+        }
+      });
+      if (!existing) projectsCreated += 1;
+    }
+    console.log(`Projects: ${projectsCreated} created, ${projects.length - projectsCreated} already existed.`);
     console.log('Database Seeding Complete.');
   } catch (err) {
     console.error(`Error seeding database: ${err.message}`);
@@ -176,18 +221,15 @@ const seedData = async () => {
 
 // If run directly
 if (require.main === module) {
-  const mongoose = require('mongoose');
-  require('dotenv').config();
-  const connStr = process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/genessence';
-  
-  mongoose.connect(connStr)
+  const reset = process.argv.includes('--reset');
+  seedData({ reset })
     .then(async () => {
-      console.log('Connected to MongoDB directly for seeding...');
-      await seedData();
+      await prisma.$disconnect();
       process.exit(0);
     })
-    .catch(err => {
-      console.error(`Direct seed connection failed: ${err.message}`);
+    .catch(async (err) => {
+      console.error(`Direct seed failed: ${err.message}`);
+      await prisma.$disconnect();
       process.exit(1);
     });
 }
