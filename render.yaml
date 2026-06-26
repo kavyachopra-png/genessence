@@ -1,11 +1,11 @@
-# Render Blueprint for the Genessence backend (Express + Prisma/PostgreSQL).
+# Render Blueprint for Genessence: API (Express + Prisma/PostgreSQL) + frontend SPA + Postgres.
 # Use via Render → "New +" → "Blueprint" pointed at this repo, OR mirror these
-# values into an existing Web Service's settings.
+# values into existing services' settings.
 #
-# Key point: the backend app + its package.json + prisma/ live in `backend/server`,
-# so the service Root Directory must be `backend/server` (NOT `backend`).
-# There is no `build` script — `npm install` runs `postinstall: prisma generate`,
-# and `npm start` runs `prisma migrate deploy && node server.js`.
+# Backend: app + package.json + prisma/ live in `backend/server` → Root Directory = `backend/server`.
+#   There is no `build` script — `npm install` runs `postinstall: prisma generate`,
+#   and `npm start` runs `prisma migrate deploy && node server.js`.
+# Frontend: Vite app in `frontend` → build outputs `dist` (Publish Directory = `dist`, NOT a command).
 
 services:
   - type: web
@@ -30,6 +30,23 @@ services:
         value: "true"              # first deploy only: seeds admin/manager/viewer if the DB is empty.
                                    # set to "false" after the first successful deploy.
       # PORT is injected by Render automatically; the app reads process.env.PORT.
+
+  # ── Frontend SPA (Vite static site) ───────────────────────────────────────
+  - type: web
+    name: genessence-web
+    runtime: static
+    rootDir: frontend
+    buildCommand: npm install && npm run build
+    staticPublishPath: ./dist          # the build output folder — NOT "npm run dev"
+    autoDeploy: true
+    # SPA fallback so client-side routes (/projects, /login, …) don't 404 on refresh
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
+    envVars:
+      - key: VITE_API_URL
+        value: https://genessence-api.onrender.com/api   # adjust if your API service URL differs
 
 databases:
   - name: genessence-db
