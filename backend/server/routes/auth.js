@@ -6,6 +6,13 @@ const prisma = require('../lib/prisma');
 const { roleToDb, serializeUser } = require('../utils/serializers');
 const { protect, authorize } = require('../middleware/auth');
 
+// Log the full error (object + stack) to the server console for debugging.
+// The stack is logged server-side only — never sent to the client.
+const logError = (context, err) => {
+  console.error(`🔴 [auth] ${context} failed:`, err);
+  if (err && err.stack) console.error(err.stack);
+};
+
 // Generate JWT Helper
 const generateToken = (id) => {
   return jwt.sign({ id }, process.env.JWT_SECRET, {
@@ -38,6 +45,7 @@ router.post('/login', async (req, res) => {
       res.status(401).json({ message: 'Invalid email or password' });
     }
   } catch (err) {
+    logError('POST /login', err);
     res.status(500).json({ message: err.message });
   }
 });
@@ -78,6 +86,7 @@ router.post('/users', protect, authorize('admin'), async (req, res) => {
     });
     res.status(201).json(serializeUser(user));
   } catch (err) {
+    logError('POST /users', err);
     res.status(500).json({ message: err.message });
   }
 });
@@ -92,6 +101,7 @@ router.get('/users', protect, authorize('admin'), async (req, res) => {
     });
     res.json(users.map(serializeUser));
   } catch (err) {
+    logError('GET /users', err);
     res.status(500).json({ message: err.message });
   }
 });
@@ -116,6 +126,7 @@ router.delete('/users/:id', protect, authorize('admin'), async (req, res) => {
     await prisma.user.delete({ where: { id: req.params.id } });
     res.json({ message: 'User removed successfully' });
   } catch (err) {
+    logError('DELETE /users/:id', err);
     res.status(500).json({ message: err.message });
   }
 });

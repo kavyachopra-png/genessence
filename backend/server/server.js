@@ -89,9 +89,14 @@ app.use((req, res) => {
   res.status(404).json({ message: `Not found: ${req.method} ${req.originalUrl}` });
 });
 
-// Global Error Handler
+// Global error handler — logs full error details server-side; never leaks the
+// stack trace to the client (the client only receives the message).
 app.use((err, req, res, next) => {
-  console.error(`[Error Handler] ${err.stack}`);
+  console.error(`🔴 [Error Handler] ${req.method} ${req.originalUrl}`);
+  console.error(`   name:    ${err.name}`);
+  console.error(`   message: ${err.message}`);
+  if (err.code) console.error(`   code:    ${err.code}`); // e.g. Prisma P1001 (DB unreachable), P2021 (table missing)
+  console.error(err.stack);
   res.status(err.status || 500).json({
     message: err.message || 'An internal server error occurred'
   });
