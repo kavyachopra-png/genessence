@@ -113,6 +113,15 @@ const startServer = async () => {
     process.exit(1);
   }
 
+  // Diagnostic: log the configured database HOST only (no credentials) so a
+  // misconfigured DATABASE_URL — e.g. localhost on a deployed server — is obvious
+  // in the logs. If this prints "localhost:5432" in production, DATABASE_URL is wrong.
+  try {
+    console.log(`🗄️  Database host: ${new URL(process.env.DATABASE_URL).host}`);
+  } catch {
+    console.warn('🗄️  DATABASE_URL is missing or unparseable — set it in the environment.');
+  }
+
   try {
     const shouldSeed = !isProduction || process.env.SEED_DATABASE === 'true';
 
